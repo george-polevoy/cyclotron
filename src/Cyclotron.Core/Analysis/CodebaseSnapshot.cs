@@ -68,6 +68,7 @@ public sealed record GraphQualitySignals(
 
 public sealed record CodebaseSnapshot(
     string TargetPath,
+    string AnalysisRootPath,
     DateTimeOffset AnalyzedAtUtc,
     CodeGraph Graph,
     IReadOnlyList<MemberMetric> MemberMetrics,

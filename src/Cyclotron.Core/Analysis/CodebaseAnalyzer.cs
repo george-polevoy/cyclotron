@@ -88,6 +88,7 @@ public sealed class CodebaseAnalyzer
 
         var snapshot = new CodebaseSnapshot(
             loadedWorkspace.ResolvedPath,
+            loadedWorkspace.ResolvedPath,
             DateTimeOffset.UtcNow,
             graph,
             state.MemberMetrics.Values.OrderBy(metric => metric.QualifiedName, StringComparer.Ordinal).ToArray(),

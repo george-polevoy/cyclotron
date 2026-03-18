@@ -126,7 +126,7 @@ public sealed class AnalysisWorkspaceService
 
                 usages.Add(new UsageLocation(
                     document.Project.Name,
-                    ToRelativePath(document.FilePath ?? document.Name, workspaceSnapshot.Snapshot.TargetPath),
+                    ToRelativePath(document.FilePath ?? document.Name, workspaceSnapshot.Snapshot.AnalysisRootPath),
                     linePosition.Line + 1,
                     linePosition.Character + 1,
                     location.IsCandidateLocation,
@@ -147,29 +147,23 @@ public sealed class AnalysisWorkspaceService
         CancellationToken cancellationToken)
     {
         var rawSnapshot = await GetSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
-        return RelativizeSnapshot(rawSnapshot, NormalizeRelativeTargetPath(targetPath));
+        return RelativizeSnapshot(rawSnapshot, NormalizeRequestedTargetPath(targetPath, rawSnapshot.Snapshot.AnalysisRootPath));
     }
 
-    public static string NormalizeRelativeTargetPath(string targetPath)
+    public static string NormalizeRequestedTargetPath(string targetPath, string analysisRootPath)
     {
         if (string.IsNullOrWhiteSpace(targetPath))
         {
-            throw new ArgumentException("targetPath must be a non-empty relative path.", nameof(targetPath));
+            throw new ArgumentException("targetPath must be a non-empty path.", nameof(targetPath));
         }
 
-        if (Path.IsPathRooted(targetPath))
-        {
-            throw new ArgumentException("targetPath must be relative. Absolute paths are not supported.", nameof(targetPath));
-        }
-
-        return Path.GetRelativePath(
-            Directory.GetCurrentDirectory(),
-            Path.GetFullPath(targetPath, Directory.GetCurrentDirectory()));
+        var fullPath = Path.GetFullPath(targetPath, Directory.GetCurrentDirectory());
+        return ToRelativePath(fullPath, analysisRootPath);
     }
 
     private static CodeWorkspaceSnapshot RelativizeSnapshot(CodeWorkspaceSnapshot rawSnapshot, string requestedTargetPath)
     {
-        var rootPath = rawSnapshot.Snapshot.TargetPath;
+        var rootPath = rawSnapshot.Snapshot.AnalysisRootPath;
         var nodeIdMap = rawSnapshot.Snapshot.Graph.Nodes.ToDictionary(
             node => node.Id,
             node => RewriteNodeId(node.Id, rootPath, requestedTargetPath),
@@ -195,6 +189,7 @@ public sealed class AnalysisWorkspaceService
         var relativizedSnapshot = rawSnapshot.Snapshot with
         {
             TargetPath = requestedTargetPath,
+            AnalysisRootPath = ".",
             Graph = new CodeGraph(relativizedNodes, relativizedEdges),
             MemberMetrics = rawSnapshot.Snapshot.MemberMetrics
                 .Select(metric => metric with { FilePath = RewritePath(metric.FilePath, rootPath) })
@@ -269,7 +264,7 @@ public sealed class AnalysisWorkspaceService
 
     private static string ToRelativePath(string path, string rootPath)
     {
-        var relativePath = Path.GetRelativePath(rootPath, path);
+        var relativePath = Path.GetRelativePath(rootPath, Path.GetFullPath(path, rootPath));
         return string.IsNullOrWhiteSpace(relativePath) ? "." : relativePath;
     }
 

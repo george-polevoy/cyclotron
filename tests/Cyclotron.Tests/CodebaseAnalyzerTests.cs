@@ -193,32 +193,34 @@ public sealed class CodebaseAnalyzerTests
     }
 
     [Fact]
-    public async Task Tools_RejectAbsoluteTargetPaths()
-    {
-        var service = new AnalysisWorkspaceService(_analyzer);
-        var tools = new CodeGraphTools(service);
-
-        var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
-            tools.AnalyzeCodebase(GetSampleProjectPath(), cancellationToken: CancellationToken.None));
-
-        Assert.Contains("relative", exception.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
     public async Task Tools_ReturnRelativePaths()
     {
         var service = new AnalysisWorkspaceService(_analyzer);
         var tools = new CodeGraphTools(service);
-        var relativeTargetPath = Path.GetRelativePath(Directory.GetCurrentDirectory(), GetSampleProjectPath());
+        var targetPath = GetSampleProjectPath();
 
-        var analysis = await tools.AnalyzeCodebase(relativeTargetPath, cancellationToken: CancellationToken.None);
-        var search = await tools.SearchSymbols(relativeTargetPath, "OrderService", cancellationToken: CancellationToken.None);
-        var usages = await tools.FindSymbolUsages(relativeTargetPath, "RecommendationService", cancellationToken: CancellationToken.None);
+        var analysis = await tools.AnalyzeCodebase(targetPath, cancellationToken: CancellationToken.None);
+        var search = await tools.SearchSymbols(targetPath, "OrderService", cancellationToken: CancellationToken.None);
+        var usages = await tools.FindSymbolUsages(targetPath, "RecommendationService", cancellationToken: CancellationToken.None);
 
         Assert.False(Path.IsPathRooted(analysis.TargetPath));
-        Assert.Equal(relativeTargetPath, analysis.TargetPath);
+        Assert.Equal("SampleCodebase.csproj", analysis.TargetPath);
         Assert.All(search.Matches, match => Assert.True(match.FilePath is null || !Path.IsPathRooted(match.FilePath)));
         Assert.All(usages.Usages, usage => Assert.False(Path.IsPathRooted(usage.FilePath)));
+    }
+
+    [Fact]
+    public async Task Tools_ReturnPathsRelativeToAnalysisRoot_WhenGivenSolutionDirectory()
+    {
+        var service = new AnalysisWorkspaceService(_analyzer);
+        var tools = new CodeGraphTools(service);
+        var targetPath = Path.GetDirectoryName(GetSampleProjectPath())!;
+
+        var analysis = await tools.AnalyzeCodebase(targetPath, cancellationToken: CancellationToken.None);
+        var search = await tools.SearchSymbols(targetPath, "OrderService", cancellationToken: CancellationToken.None);
+
+        Assert.Equal(".", analysis.TargetPath);
+        Assert.Contains(search.Matches, match => match.FilePath == Path.Combine("Orders", "OrderService.cs"));
     }
 
     [Fact]
