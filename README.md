@@ -49,7 +49,7 @@ dotnet build Cyclotron.sln
 Run the MCP server over stdio:
 
 ```bash
-dotnet run --project /Users/gp/src/cyclotron/src/Cyclotron.Server
+dotnet run --project src/Cyclotron.Server
 ```
 
 The server exposes tools named from the public methods in `CodeGraphTools`, including:
