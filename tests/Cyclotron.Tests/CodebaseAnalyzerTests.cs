@@ -192,6 +192,87 @@ public sealed class CodebaseAnalyzerTests
         }
     }
 
+    [Fact]
+    public async Task Tools_RejectAbsoluteTargetPaths()
+    {
+        var service = new AnalysisWorkspaceService(_analyzer);
+        var tools = new CodeGraphTools(service);
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
+            tools.AnalyzeCodebase(GetSampleProjectPath(), cancellationToken: CancellationToken.None));
+
+        Assert.Contains("relative", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Tools_ReturnRelativePaths()
+    {
+        var service = new AnalysisWorkspaceService(_analyzer);
+        var tools = new CodeGraphTools(service);
+        var relativeTargetPath = Path.GetRelativePath(Directory.GetCurrentDirectory(), GetSampleProjectPath());
+
+        var analysis = await tools.AnalyzeCodebase(relativeTargetPath, cancellationToken: CancellationToken.None);
+        var search = await tools.SearchSymbols(relativeTargetPath, "OrderService", cancellationToken: CancellationToken.None);
+        var usages = await tools.FindSymbolUsages(relativeTargetPath, "RecommendationService", cancellationToken: CancellationToken.None);
+
+        Assert.False(Path.IsPathRooted(analysis.TargetPath));
+        Assert.Equal(relativeTargetPath, analysis.TargetPath);
+        Assert.All(search.Matches, match => Assert.True(match.FilePath is null || !Path.IsPathRooted(match.FilePath)));
+        Assert.All(usages.Usages, usage => Assert.False(Path.IsPathRooted(usage.FilePath)));
+    }
+
+    [Fact]
+    public async Task Service_ReusesSnapshotUntilSourcesChange()
+    {
+        var root = CreateTempDirectory();
+
+        try
+        {
+            await WriteProjectAsync(root, "ProjA", "Worker.cs", """
+                namespace ProjA;
+
+                public sealed class Worker
+                {
+                    public int Value() => 1;
+                }
+                """);
+
+            var service = new AnalysisWorkspaceService(_analyzer);
+
+            var first = await service.GetSnapshotAsync(root, forceRefresh: false, CancellationToken.None);
+            var second = await service.GetSnapshotAsync(root, forceRefresh: false, CancellationToken.None);
+
+            Assert.Same(first, second);
+
+            await Task.Delay(1100);
+            await WriteFileAsync(Path.Combine(root, "ProjA", "Worker.cs"), """
+                namespace ProjA;
+
+                public sealed class Worker
+                {
+                    public int Value()
+                    {
+                        if (true)
+                        {
+                            return 1;
+                        }
+
+                        return 0;
+                    }
+                }
+                """);
+
+            var third = await service.GetSnapshotAsync(root, forceRefresh: false, CancellationToken.None);
+
+            Assert.NotSame(first, third);
+            Assert.Contains(third.Snapshot.MemberMetrics, metric => metric.CyclomaticComplexity > 1);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
     private static string GetSampleProjectPath()
     {
         var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));

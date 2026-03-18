@@ -21,7 +21,7 @@ public sealed class CodeGraphTools
         [Description("When true, rebuild the graph instead of using the cached snapshot.")] bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        var workspaceSnapshot = await _workspaceService.GetSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
+        var workspaceSnapshot = await _workspaceService.GetApiSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
         var snapshot = workspaceSnapshot.Snapshot;
 
         return new AnalyzeCodebaseResponse(
@@ -42,7 +42,7 @@ public sealed class CodeGraphTools
         [Description("When true, rebuild the graph instead of using the cached snapshot.")] bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        var workspaceSnapshot = await _workspaceService.GetSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
+        var workspaceSnapshot = await _workspaceService.GetApiSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
         var allowedKinds = ParseKinds(kinds);
         var candidates = workspaceSnapshot.Snapshot.Graph.SearchNodes(query, allowedKinds)
             .Select(node => new SymbolCandidate(node.Id, node.DisplayName, node.QualifiedName, node.Kind.ToString(), node.FilePath))
@@ -58,7 +58,7 @@ public sealed class CodeGraphTools
         [Description("When true, rebuild the graph instead of using the cached snapshot.")] bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        var workspaceSnapshot = await _workspaceService.GetSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
+        var workspaceSnapshot = await _workspaceService.GetApiSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
         var resolution = _workspaceService.ResolveSymbol(workspaceSnapshot, symbolQuery, CodeNodeKind.Type);
         if (resolution.Selected is null)
         {
@@ -112,7 +112,7 @@ public sealed class CodeGraphTools
         [Description("When true, rebuild the graph instead of using the cached snapshot.")] bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        var workspaceSnapshot = await _workspaceService.GetSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
+        var workspaceSnapshot = await _workspaceService.GetApiSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
         var resolution = _workspaceService.ResolveSymbol(workspaceSnapshot, symbolQuery, CodeNodeKind.Type, CodeNodeKind.Member, CodeNodeKind.Namespace);
         if (resolution.Selected is null)
         {
@@ -130,7 +130,7 @@ public sealed class CodeGraphTools
         [Description("When true, rebuild the graph instead of using the cached snapshot.")] bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        var workspaceSnapshot = await _workspaceService.GetSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
+        var workspaceSnapshot = await _workspaceService.GetApiSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
         var snapshot = workspaceSnapshot.Snapshot;
 
         if (string.IsNullOrWhiteSpace(symbolQuery))
@@ -165,7 +165,7 @@ public sealed class CodeGraphTools
         [Description("When true, rebuild the graph instead of using the cached snapshot.")] bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        var workspaceSnapshot = await _workspaceService.GetSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
+        var workspaceSnapshot = await _workspaceService.GetApiSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
         var resolution = _workspaceService.ResolveSymbol(workspaceSnapshot, startSymbol, CodeNodeKind.Type, CodeNodeKind.Member, CodeNodeKind.Namespace, CodeNodeKind.File);
         if (resolution.Selected is null)
         {
@@ -218,7 +218,7 @@ public sealed class CodeGraphTools
         [Description("When true, rebuild the graph instead of using the cached snapshot.")] bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        var workspaceSnapshot = await _workspaceService.GetSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
+        var workspaceSnapshot = await _workspaceService.GetApiSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
         return new GraphSignalsResponse(
             workspaceSnapshot.Snapshot.Signals.Overview,
             workspaceSnapshot.Snapshot.Signals.Hotspots,
