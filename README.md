@@ -62,6 +62,17 @@ The server exposes tools named from the public methods in `CodeGraphTools`, incl
 - `BfsGraph`
 - `GetGraphQualitySignals`
 
+## Runtime state
+
+Cyclotron keeps analyzed codebases in RAM for the lifetime of the running MCP server process.
+
+- The cache is process-wide, not per request or per MCP conversation.
+- Cache entries are keyed by analyzed target path, so one server process can keep multiple repositories hot at once.
+- Repeated queries against an unchanged target reuse the in-memory Roslyn snapshot instead of rebuilding it.
+- If `.cs`, `.csproj`, `.sln`, `.props`, or `.targets` files change, Cyclotron automatically refreshes that cached entry on the next query.
+- `forceRefresh=true` bypasses the cache and rebuilds immediately.
+- Restarting the MCP server clears all in-memory state.
+
 ## Next useful steps
 
 1. Add a first-class query DSL over the graph instead of tool-by-tool traversal.
