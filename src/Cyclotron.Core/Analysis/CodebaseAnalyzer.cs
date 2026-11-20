@@ -5,6 +5,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.Text;
 
 namespace Cyclotron.Core.Analysis;
@@ -92,6 +93,7 @@ public sealed class CodebaseAnalyzer
             DateTimeOffset.UtcNow,
             graph,
             state.MemberMetrics.Values.OrderBy(metric => metric.QualifiedName, StringComparer.Ordinal).ToArray(),
+            state.MethodBodySummaries.Values.OrderBy(summary => summary.QualifiedName, StringComparer.Ordinal).ToArray(),
             typeMetrics.OrderBy(metric => metric.QualifiedName, StringComparer.Ordinal).ToArray(),
             qualitySignals,
             state.Diagnostics.Distinct(StringComparer.Ordinal).OrderBy(message => message, StringComparer.Ordinal).ToArray());
@@ -370,6 +372,7 @@ public sealed class CodebaseAnalyzer
                     semanticModel,
                     accessor.Body ?? (SyntaxNode?)accessor.ExpressionBody?.Expression,
                     accessorSymbol.AssociatedSymbol,
+                    GetAccessorBodyValueBehavior(accessor),
                     accessor.SyntaxTree.FilePath,
                     state,
                     cancellationToken);
@@ -394,6 +397,7 @@ public sealed class CodebaseAnalyzer
                     semanticModel,
                     property.ExpressionBody.Expression,
                     propertySymbol,
+                    BodyValueBehavior.ReturnedValue,
                     property.SyntaxTree.FilePath,
                     state,
                     cancellationToken);
@@ -418,6 +422,7 @@ public sealed class CodebaseAnalyzer
                     semanticModel,
                     indexer.ExpressionBody.Expression,
                     indexerSymbol,
+                    BodyValueBehavior.ReturnedValue,
                     indexer.SyntaxTree.FilePath,
                     state,
                     cancellationToken);
@@ -436,6 +441,7 @@ public sealed class CodebaseAnalyzer
             semanticModel,
             GetBodyRoot(declaration),
             methodSymbol,
+            GetMethodBodyValueBehavior(declaration, methodSymbol),
             declaration.SyntaxTree.FilePath,
             state,
             cancellationToken);
@@ -445,6 +451,7 @@ public sealed class CodebaseAnalyzer
         SemanticModel semanticModel,
         SyntaxNode? bodyRoot,
         ISymbol memberSymbol,
+        BodyValueBehavior bodyValueBehavior,
         string? filePath,
         BuilderState state,
         CancellationToken cancellationToken)
@@ -480,6 +487,22 @@ public sealed class CodebaseAnalyzer
         if (bodyRoot is null)
         {
             return;
+        }
+
+        var summary = BuildMethodBodySummary(
+            semanticModel,
+            bodyRoot,
+            memberSymbol,
+            containingTypeId,
+            normalizedFilePath,
+            bodyValueBehavior,
+            state,
+            cancellationToken);
+        if (summary is not null)
+        {
+            state.MethodBodySummaries[memberId] = state.MethodBodySummaries.TryGetValue(memberId, out var existingSummary)
+                ? MergeMethodBodySummary(existingSummary, summary)
+                : summary;
         }
 
         var fieldUsage = state.MethodFieldUsage.GetOrAdd(memberId, _ => new HashSet<string>(StringComparer.Ordinal));
@@ -585,6 +608,63 @@ public sealed class CodebaseAnalyzer
             }
         }
     }
+
+    private static MethodBodySummary BuildMethodBodySummary(
+        SemanticModel semanticModel,
+        SyntaxNode bodyRoot,
+        ISymbol memberSymbol,
+        string containingTypeId,
+        string? filePath,
+        BodyValueBehavior bodyValueBehavior,
+        BuilderState state,
+        CancellationToken cancellationToken)
+    {
+        var operation = semanticModel.GetOperation(bodyRoot, cancellationToken);
+        var analyzer = new BodySummaryAnalyzer(state.SymbolsById);
+        return analyzer.Analyze(operation, memberSymbol, containingTypeId, filePath, bodyValueBehavior);
+    }
+
+    private static MethodBodySummary MergeMethodBodySummary(MethodBodySummary existing, MethodBodySummary next)
+    {
+        var mergedAllocations = existing.Allocations
+            .Concat(next.Allocations.Select((allocation, index) => allocation with { Index = existing.AllocationCount + index + 1 }))
+            .ToArray();
+
+        return existing with
+        {
+            AllocationCount = mergedAllocations.Length,
+            Allocations = mergedAllocations,
+            HasReturnEscape = existing.HasReturnEscape || next.HasReturnEscape,
+            HasFieldOrPropertyEscape = existing.HasFieldOrPropertyEscape || next.HasFieldOrPropertyEscape,
+            HasArgumentEscape = existing.HasArgumentEscape || next.HasArgumentEscape,
+            HasCapturedVariableEscape = existing.HasCapturedVariableEscape || next.HasCapturedVariableEscape,
+            HasUnknownEscape = existing.HasUnknownEscape || next.HasUnknownEscape,
+            HasSideEffects = existing.HasSideEffects || next.HasSideEffects,
+            IsPureLike = existing.IsPureLike && next.IsPureLike,
+            FilePath = existing.FilePath ?? next.FilePath,
+        };
+    }
+
+    private static BodyValueBehavior GetMethodBodyValueBehavior(BaseMethodDeclarationSyntax declaration, IMethodSymbol methodSymbol)
+    {
+        if (methodSymbol.ReturnsVoid)
+        {
+            return BodyValueBehavior.StatementLike;
+        }
+
+        return declaration switch
+        {
+            MethodDeclarationSyntax { ExpressionBody: not null } => BodyValueBehavior.ReturnedValue,
+            OperatorDeclarationSyntax { ExpressionBody: not null } => BodyValueBehavior.ReturnedValue,
+            ConversionOperatorDeclarationSyntax { ExpressionBody: not null } => BodyValueBehavior.ReturnedValue,
+            _ => BodyValueBehavior.StatementLike,
+        };
+    }
+
+    private static BodyValueBehavior GetAccessorBodyValueBehavior(AccessorDeclarationSyntax accessor) =>
+        accessor.Keyword.IsKind(SyntaxKind.GetKeyword)
+            ? BodyValueBehavior.ReturnedValue
+            : BodyValueBehavior.StatementLike;
 
     private static IReadOnlyList<TypeMetric> BuildTypeMetrics(BuilderState state)
     {
@@ -1097,6 +1177,609 @@ public sealed class CodebaseAnalyzer
         IReadOnlyList<Project> Projects,
         IReadOnlyList<string> Diagnostics);
 
+    private enum BodyValueBehavior
+    {
+        StatementLike,
+        ReturnedValue,
+    }
+
+    private sealed class BodySummaryAnalyzer
+    {
+        private readonly IReadOnlyDictionary<string, ISymbol> _symbolsById;
+        private readonly Dictionary<int, AllocationSiteState> _allocations = new();
+        private Dictionary<ILocalSymbol, ValueState> _locals = CreateLocalStateMap();
+        private int _nextAllocationIndex = 1;
+
+        public BodySummaryAnalyzer(IReadOnlyDictionary<string, ISymbol> symbolsById)
+        {
+            _symbolsById = symbolsById;
+        }
+
+        public MethodBodySummary Analyze(
+            IOperation? operation,
+            ISymbol memberSymbol,
+            string containingTypeId,
+            string? filePath,
+            BodyValueBehavior bodyValueBehavior)
+        {
+            if (operation is not null)
+            {
+                if (bodyValueBehavior == BodyValueBehavior.ReturnedValue)
+                {
+                    MarkReturnEscape(EvaluateExpression(operation));
+                }
+                else
+                {
+                    AnalyzeOperation(operation);
+                }
+            }
+
+            var allocations = _allocations.Values
+                .OrderBy(allocation => allocation.Index)
+                .Select(allocation => new AllocationSiteSummary(
+                    allocation.Index,
+                    allocation.Kind,
+                    allocation.TypeName,
+                    allocation.EscapesViaReturn,
+                    allocation.EscapesViaMember,
+                    allocation.EscapesViaArgument,
+                    allocation.CapturedByClosure,
+                    allocation.HasUnknownEscape))
+                .ToArray();
+
+            return new MethodBodySummary(
+                CreateSymbolId(memberSymbol),
+                GetDisplayName(memberSymbol),
+                GetQualifiedName(memberSymbol),
+                GetMemberKind(memberSymbol),
+                containingTypeId,
+                allocations.Length,
+                allocations,
+                HasReturnEscape,
+                HasFieldOrPropertyEscape,
+                HasArgumentEscape,
+                HasCapturedVariableEscape,
+                HasUnknownEscape,
+                HasSideEffects,
+                !HasSideEffects && !HasUnknownEscape,
+                filePath);
+        }
+
+        private bool HasReturnEscape { get; set; }
+
+        private bool HasFieldOrPropertyEscape { get; set; }
+
+        private bool HasArgumentEscape { get; set; }
+
+        private bool HasCapturedVariableEscape { get; set; }
+
+        private bool HasUnknownEscape { get; set; }
+
+        private bool HasSideEffects { get; set; }
+
+        private void AnalyzeOperation(IOperation? operation)
+        {
+            switch (operation)
+            {
+                case null:
+                    return;
+
+                case IBlockOperation block:
+                    foreach (var nested in block.Operations)
+                    {
+                        AnalyzeOperation(nested);
+                    }
+
+                    return;
+
+                case IVariableDeclarationGroupOperation declarationGroup:
+                    foreach (var declaration in declarationGroup.Declarations)
+                    {
+                        AnalyzeOperation(declaration);
+                    }
+
+                    return;
+
+                case IVariableDeclarationOperation declaration:
+                    foreach (var declarator in declaration.Declarators)
+                    {
+                        AnalyzeOperation(declarator);
+                    }
+
+                    return;
+
+                case IVariableDeclaratorOperation declarator when declarator.Symbol is ILocalSymbol local:
+                    _locals[local] = declarator.Initializer is null
+                        ? ValueState.None
+                        : EvaluateExpression(declarator.Initializer.Value);
+                    return;
+
+                case IExpressionStatementOperation expressionStatement:
+                    _ = EvaluateExpression(expressionStatement.Operation);
+                    return;
+
+                case ISimpleAssignmentOperation assignment:
+                    HandleAssignment(assignment.Target, assignment.Value);
+                    return;
+
+                case ICompoundAssignmentOperation compoundAssignment:
+                    _ = EvaluateExpression(compoundAssignment.Target);
+                    HandleAssignment(compoundAssignment.Target, compoundAssignment.Value);
+                    return;
+
+                case ICoalesceAssignmentOperation coalesceAssignment:
+                    _ = EvaluateExpression(coalesceAssignment.Target);
+                    HandleAssignment(coalesceAssignment.Target, coalesceAssignment.Value);
+                    return;
+
+                case IReturnOperation returnOperation:
+                    MarkReturnEscape(EvaluateExpression(returnOperation.ReturnedValue));
+                    return;
+
+                case IConditionalOperation conditionalOperation:
+                    _ = EvaluateExpression(conditionalOperation.Condition);
+                    AnalyzeSplitBranches(conditionalOperation.WhenTrue, conditionalOperation.WhenFalse);
+                    return;
+
+                case ISwitchOperation switchOperation:
+                    _ = EvaluateExpression(switchOperation.Value);
+                    AnalyzeSwitchBranches(switchOperation.Cases);
+                    return;
+
+                case IAnonymousFunctionOperation anonymousFunction:
+                    AnalyzeAnonymousFunctionCapture(anonymousFunction);
+                    return;
+
+                case ILocalFunctionOperation:
+                    return;
+
+                default:
+                    foreach (var child in operation.ChildOperations)
+                    {
+                        AnalyzeOperation(child);
+                    }
+
+                    return;
+            }
+        }
+
+        private ValueState EvaluateExpression(IOperation? operation)
+        {
+            switch (operation)
+            {
+                case null:
+                    return ValueState.None;
+
+                case IConversionOperation conversion:
+                    return EvaluateExpression(conversion.Operand);
+
+                case IArgumentOperation argument:
+                    return EvaluateExpression(argument.Value);
+
+                case ISimpleAssignmentOperation assignment:
+                {
+                    var value = EvaluateExpression(assignment.Value);
+                    AssignToTarget(assignment.Target, value);
+                    return value;
+                }
+
+                case IConditionalOperation conditionalOperation:
+                {
+                    _ = EvaluateExpression(conditionalOperation.Condition);
+                    return EvaluateConditionalBranches(conditionalOperation.WhenTrue, conditionalOperation.WhenFalse);
+                }
+
+                case ISwitchExpressionOperation switchExpression:
+                {
+                    _ = EvaluateExpression(switchExpression.Value);
+                    return EvaluateSwitchArms(switchExpression.Arms);
+                }
+
+                case IAwaitOperation awaitOperation:
+                    return EvaluateExpression(awaitOperation.Operation);
+
+                case IObjectCreationOperation objectCreation:
+                    ProcessCallArguments(objectCreation.Constructor, objectCreation.Arguments.Select(argumentOperation => EvaluateExpression(argumentOperation.Value)));
+                    return CreateAllocation("Object", objectCreation.Type);
+
+                case IAnonymousObjectCreationOperation anonymousObjectCreation:
+                    foreach (var initializer in anonymousObjectCreation.Initializers)
+                    {
+                        _ = EvaluateExpression(initializer);
+                    }
+
+                    return CreateAllocation("AnonymousObject", anonymousObjectCreation.Type);
+
+                case IArrayCreationOperation arrayCreation:
+                    foreach (var child in arrayCreation.ChildOperations)
+                    {
+                        _ = EvaluateExpression(child);
+                    }
+
+                    return CreateAllocation("Array", arrayCreation.Type);
+
+                case ILocalReferenceOperation localReference when _locals.TryGetValue(localReference.Local, out var localValue):
+                    return localValue;
+
+                case ILocalReferenceOperation localReference:
+                    return IsEscapableType(localReference.Type) ? ValueState.NonLocalReference : ValueState.None;
+
+                case IParameterReferenceOperation parameterReference:
+                    return IsEscapableType(parameterReference.Type) ? ValueState.NonLocalReference : ValueState.None;
+
+                case IFieldReferenceOperation fieldReference:
+                    EvaluateTargetChildren(fieldReference);
+                    return IsEscapableType(fieldReference.Type) ? ValueState.NonLocalReference : ValueState.None;
+
+                case IPropertyReferenceOperation propertyReference:
+                    EvaluateTargetChildren(propertyReference);
+                    return IsEscapableType(propertyReference.Type) ? ValueState.NonLocalReference : ValueState.None;
+
+                case IArrayElementReferenceOperation arrayElementReference:
+                    EvaluateTargetChildren(arrayElementReference);
+                    return IsEscapableType(arrayElementReference.Type) ? ValueState.NonLocalReference : ValueState.None;
+
+                case IInvocationOperation invocation:
+                {
+                    if (invocation.Instance is not null)
+                    {
+                        _ = EvaluateExpression(invocation.Instance);
+                    }
+
+                    var argumentStates = invocation.Arguments
+                        .Select(argumentOperation => EvaluateExpression(argumentOperation.Value))
+                        .ToArray();
+                    ProcessCallArguments(invocation.TargetMethod, argumentStates);
+                    return IsEscapableType(invocation.Type) ? ValueState.NonLocalReference : ValueState.None;
+                }
+
+                case IAnonymousFunctionOperation anonymousFunction:
+                    AnalyzeAnonymousFunctionCapture(anonymousFunction);
+                    return IsEscapableType(anonymousFunction.Type) ? ValueState.NonLocalReference : ValueState.None;
+
+                case ILocalFunctionOperation:
+                    return ValueState.None;
+
+                default:
+                {
+                    var combined = ValueState.None;
+                    foreach (var child in operation.ChildOperations)
+                    {
+                        combined = combined.Merge(EvaluateExpression(child));
+                    }
+
+                    return combined.HasEscapableValue || !IsEscapableType(operation.Type)
+                        ? combined
+                        : ValueState.NonLocalReference;
+                }
+            }
+        }
+
+        private void HandleAssignment(IOperation target, IOperation? valueOperation)
+        {
+            var value = EvaluateExpression(valueOperation);
+            AssignToTarget(target, value);
+        }
+
+        private void AssignToTarget(IOperation target, ValueState value)
+        {
+            switch (target)
+            {
+                case ILocalReferenceOperation localReference:
+                    _locals[localReference.Local] = value;
+                    return;
+
+                case IFieldReferenceOperation:
+                case IPropertyReferenceOperation:
+                    EvaluateTargetChildren(target);
+                    if (value.HasEscapableValue)
+                    {
+                        HasFieldOrPropertyEscape = true;
+                        HasSideEffects = true;
+                        MarkAllocationEscape(value, allocation => allocation.EscapesViaMember = true);
+                    }
+
+                    return;
+
+                default:
+                    EvaluateTargetChildren(target);
+                    return;
+            }
+        }
+
+        private void AnalyzeSplitBranches(IOperation? whenTrue, IOperation? whenFalse)
+        {
+            var before = CloneLocals(_locals);
+
+            var trueLocals = CloneLocals(before);
+            _locals = trueLocals;
+            AnalyzeOperation(whenTrue);
+
+            var falseLocals = CloneLocals(before);
+            _locals = falseLocals;
+            AnalyzeOperation(whenFalse);
+
+            _locals = MergeLocals(trueLocals, falseLocals);
+        }
+
+        private ValueState EvaluateConditionalBranches(IOperation? whenTrue, IOperation? whenFalse)
+        {
+            var before = CloneLocals(_locals);
+
+            var trueLocals = CloneLocals(before);
+            _locals = trueLocals;
+            var whenTrueValue = EvaluateExpression(whenTrue);
+
+            var falseLocals = CloneLocals(before);
+            _locals = falseLocals;
+            var whenFalseValue = EvaluateExpression(whenFalse);
+
+            _locals = MergeLocals(trueLocals, falseLocals);
+            return whenTrueValue.Merge(whenFalseValue);
+        }
+
+        private void AnalyzeSwitchBranches(IEnumerable<ISwitchCaseOperation> cases)
+        {
+            var before = CloneLocals(_locals);
+            Dictionary<ILocalSymbol, ValueState>? merged = null;
+
+            foreach (var caseOperation in cases)
+            {
+                var branchLocals = CloneLocals(before);
+                _locals = branchLocals;
+                foreach (var clause in caseOperation.Clauses)
+                {
+                    _ = EvaluateExpression(clause);
+                }
+
+                foreach (var bodyOperation in caseOperation.Body)
+                {
+                    AnalyzeOperation(bodyOperation);
+                }
+
+                merged = merged is null ? CloneLocals(branchLocals) : MergeLocals(merged, branchLocals);
+            }
+
+            _locals = merged ?? before;
+        }
+
+        private ValueState EvaluateSwitchArms(IEnumerable<ISwitchExpressionArmOperation> arms)
+        {
+            var before = CloneLocals(_locals);
+            var combined = ValueState.None;
+            Dictionary<ILocalSymbol, ValueState>? merged = null;
+
+            foreach (var arm in arms)
+            {
+                var branchLocals = CloneLocals(before);
+                _locals = branchLocals;
+                if (arm.Pattern is not null)
+                {
+                    _ = EvaluateExpression(arm.Pattern);
+                }
+
+                if (arm.Guard is not null)
+                {
+                    _ = EvaluateExpression(arm.Guard);
+                }
+
+                combined = combined.Merge(EvaluateExpression(arm.Value));
+                merged = merged is null ? CloneLocals(branchLocals) : MergeLocals(merged, branchLocals);
+            }
+
+            _locals = merged ?? before;
+            return combined;
+        }
+
+        private void AnalyzeAnonymousFunctionCapture(IAnonymousFunctionOperation anonymousFunction)
+        {
+            if (anonymousFunction.Body is null)
+            {
+                return;
+            }
+
+            var stack = new Stack<IOperation>();
+            stack.Push(anonymousFunction.Body);
+
+            while (stack.Count > 0)
+            {
+                var current = stack.Pop();
+                if (!ReferenceEquals(current, anonymousFunction.Body) &&
+                    current is IAnonymousFunctionOperation or ILocalFunctionOperation)
+                {
+                    continue;
+                }
+
+                if (current is ILocalReferenceOperation localReference &&
+                    _locals.TryGetValue(localReference.Local, out var localValue) &&
+                    localValue.HasEscapableValue)
+                {
+                    HasCapturedVariableEscape = true;
+                    HasUnknownEscape = true;
+                    MarkAllocationEscape(localValue, allocation =>
+                    {
+                        allocation.CapturedByClosure = true;
+                        allocation.HasUnknownEscape = true;
+                    });
+                }
+
+                foreach (var child in current.ChildOperations.Reverse())
+                {
+                    stack.Push(child);
+                }
+            }
+        }
+
+        private void EvaluateTargetChildren(IOperation operation)
+        {
+            foreach (var child in operation.ChildOperations)
+            {
+                _ = EvaluateExpression(child);
+            }
+        }
+
+        private void ProcessCallArguments(IMethodSymbol? targetMethod, IEnumerable<ValueState> argumentStates)
+        {
+            var anyEscapingArgument = false;
+            var isUnknownTarget = targetMethod is null || !IsKnownSourceMethod(targetMethod);
+
+            foreach (var argumentState in argumentStates)
+            {
+                if (!argumentState.HasEscapableValue)
+                {
+                    continue;
+                }
+
+                anyEscapingArgument = true;
+                MarkAllocationEscape(argumentState, allocation => allocation.EscapesViaArgument = true);
+                if (isUnknownTarget)
+                {
+                    MarkAllocationEscape(argumentState, allocation => allocation.HasUnknownEscape = true);
+                }
+            }
+
+            if (!anyEscapingArgument)
+            {
+                return;
+            }
+
+            HasArgumentEscape = true;
+            if (isUnknownTarget)
+            {
+                HasUnknownEscape = true;
+                HasSideEffects = true;
+            }
+        }
+
+        private void MarkReturnEscape(ValueState value)
+        {
+            if (!value.HasEscapableValue)
+            {
+                return;
+            }
+
+            HasReturnEscape = true;
+            MarkAllocationEscape(value, allocation => allocation.EscapesViaReturn = true);
+        }
+
+        private void MarkAllocationEscape(ValueState value, Action<AllocationSiteState> update)
+        {
+            foreach (var allocationId in value.AllocationIds)
+            {
+                if (_allocations.TryGetValue(allocationId, out var allocation))
+                {
+                    update(allocation);
+                }
+            }
+        }
+
+        private ValueState CreateAllocation(string kind, ITypeSymbol? type)
+        {
+            var index = _nextAllocationIndex++;
+            _allocations[index] = new AllocationSiteState(index, kind, type?.ToDisplayString(QualifiedNameFormat));
+            return new ValueState(new[] { index }, false);
+        }
+
+        private bool IsKnownSourceMethod(IMethodSymbol targetMethod)
+        {
+            if (targetMethod.ReducedFrom is not null)
+            {
+                targetMethod = targetMethod.ReducedFrom;
+            }
+
+            return _symbolsById.ContainsKey(CreateSymbolId(targetMethod));
+        }
+
+        private static bool IsEscapableType(ITypeSymbol? typeSymbol)
+        {
+            if (typeSymbol is null)
+            {
+                return false;
+            }
+
+            return typeSymbol.TypeKind == TypeKind.Dynamic
+                   || typeSymbol.TypeKind == TypeKind.TypeParameter
+                   || typeSymbol.IsReferenceType;
+        }
+
+        private static Dictionary<ILocalSymbol, ValueState> CreateLocalStateMap() =>
+            new(SymbolEqualityComparer.Default);
+
+        private static Dictionary<ILocalSymbol, ValueState> CloneLocals(Dictionary<ILocalSymbol, ValueState> source) =>
+            new(source, SymbolEqualityComparer.Default);
+
+        private static Dictionary<ILocalSymbol, ValueState> MergeLocals(
+            Dictionary<ILocalSymbol, ValueState> left,
+            Dictionary<ILocalSymbol, ValueState> right)
+        {
+            var merged = CloneLocals(left);
+            foreach (var (local, value) in right)
+            {
+                merged[local] = merged.TryGetValue(local, out var existing)
+                    ? existing.Merge(value)
+                    : value;
+            }
+
+            return merged;
+        }
+
+        private sealed class AllocationSiteState
+        {
+            public AllocationSiteState(int index, string kind, string? typeName)
+            {
+                Index = index;
+                Kind = kind;
+                TypeName = typeName;
+            }
+
+            public int Index { get; }
+
+            public string Kind { get; }
+
+            public string? TypeName { get; }
+
+            public bool EscapesViaReturn { get; set; }
+
+            public bool EscapesViaMember { get; set; }
+
+            public bool EscapesViaArgument { get; set; }
+
+            public bool CapturedByClosure { get; set; }
+
+            public bool HasUnknownEscape { get; set; }
+        }
+
+        private readonly record struct ValueState(IReadOnlyList<int> AllocationIds, bool HasNonLocalReference)
+        {
+            public static ValueState None => new(Array.Empty<int>(), false);
+
+            public static ValueState NonLocalReference => new(Array.Empty<int>(), true);
+
+            public bool HasEscapableValue => HasNonLocalReference || AllocationIds.Count > 0;
+
+            public ValueState Merge(ValueState other)
+            {
+                if (AllocationIds.Count == 0 && !HasNonLocalReference)
+                {
+                    return other;
+                }
+
+                if (other.AllocationIds.Count == 0 && !other.HasNonLocalReference)
+                {
+                    return this;
+                }
+
+                var allocationIds = AllocationIds
+                    .Concat(other.AllocationIds)
+                    .Distinct()
+                    .OrderBy(id => id)
+                    .ToArray();
+
+                return new ValueState(allocationIds, HasNonLocalReference || other.HasNonLocalReference);
+            }
+        }
+    }
+
     private sealed class BuilderState
     {
         private readonly HashSet<EdgeKey> _edgeKeys = new();
@@ -1132,6 +1815,8 @@ public sealed class CodebaseAnalyzer
         public Dictionary<string, string> TypeKinds { get; } = new(StringComparer.Ordinal);
 
         public Dictionary<string, MemberMetric> MemberMetrics { get; } = new(StringComparer.Ordinal);
+
+        public Dictionary<string, MethodBodySummary> MethodBodySummaries { get; } = new(StringComparer.Ordinal);
 
         public Dictionary<string, string> DiagnosticsMap { get; } = new(StringComparer.Ordinal);
 

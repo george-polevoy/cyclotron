@@ -194,6 +194,9 @@ public sealed class AnalysisWorkspaceService
             MemberMetrics = rawSnapshot.Snapshot.MemberMetrics
                 .Select(metric => metric with { FilePath = RewritePath(metric.FilePath, rootPath) })
                 .ToArray(),
+            MethodBodySummaries = rawSnapshot.Snapshot.MethodBodySummaries
+                .Select(summary => summary with { FilePath = RewritePath(summary.FilePath, rootPath) })
+                .ToArray(),
             TypeMetrics = rawSnapshot.Snapshot.TypeMetrics
                 .Select(metric => metric with { FilePath = RewritePath(metric.FilePath, rootPath) })
                 .ToArray(),
@@ -264,7 +267,11 @@ public sealed class AnalysisWorkspaceService
 
     private static string ToRelativePath(string path, string rootPath)
     {
-        var relativePath = Path.GetRelativePath(rootPath, Path.GetFullPath(path, rootPath));
+        var fullRootPath = Path.GetFullPath(rootPath, Directory.GetCurrentDirectory());
+        var fullPath = Path.IsPathRooted(path)
+            ? Path.GetFullPath(path)
+            : Path.GetFullPath(path, fullRootPath);
+        var relativePath = Path.GetRelativePath(fullRootPath, fullPath);
         return string.IsNullOrWhiteSpace(relativePath) ? "." : relativePath;
     }
 

@@ -127,6 +127,133 @@ public sealed class CodebaseAnalyzerTests
     }
 
     [Fact]
+    public async Task AnalyzeAsync_BuildsMethodBodySummaries_ForEscapeScenarios()
+    {
+        var root = CreateTempDirectory();
+
+        try
+        {
+            await WriteFileAsync(Path.Combine(root, "Sample.cs"), """
+                using System;
+
+                public sealed class Sample
+                {
+                    private object? _value;
+
+                    public object CreateAndReturn()
+                    {
+                        var item = new object();
+                        return item;
+                    }
+
+                    public void Store()
+                    {
+                        var item = new object();
+                        _value = item;
+                    }
+
+                    public void Pass(Action<object> sink)
+                    {
+                        var item = new object();
+                        sink(item);
+                    }
+
+                    public void KeepLocal()
+                    {
+                        var item = new object();
+                    }
+
+                    public Func<object> Capture()
+                    {
+                        var item = new object();
+                        return () => item;
+                    }
+                }
+                """);
+
+            var snapshot = await _analyzer.AnalyzeAsync(root);
+            var summaries = snapshot.Snapshot.MethodBodySummaries;
+
+            var createAndReturn = summaries.Single(summary => summary.QualifiedName == "Sample.CreateAndReturn()");
+            Assert.Equal(1, createAndReturn.AllocationCount);
+            Assert.True(createAndReturn.HasReturnEscape);
+            Assert.False(createAndReturn.HasFieldOrPropertyEscape);
+            Assert.False(createAndReturn.HasArgumentEscape);
+            Assert.True(createAndReturn.Allocations.Single().EscapesViaReturn);
+
+            var store = summaries.Single(summary => summary.QualifiedName == "Sample.Store()");
+            Assert.Equal(1, store.AllocationCount);
+            Assert.True(store.HasFieldOrPropertyEscape);
+            Assert.True(store.HasSideEffects);
+            Assert.True(store.Allocations.Single().EscapesViaMember);
+
+            var pass = summaries.Single(summary => summary.QualifiedName == "Sample.Pass(System.Action<object> sink)");
+            Assert.Equal(1, pass.AllocationCount);
+            Assert.True(pass.HasArgumentEscape);
+            Assert.True(pass.HasUnknownEscape);
+            Assert.True(pass.Allocations.Single().EscapesViaArgument);
+            Assert.True(pass.Allocations.Single().HasUnknownEscape);
+
+            var keepLocal = summaries.Single(summary => summary.QualifiedName == "Sample.KeepLocal()");
+            Assert.Equal(1, keepLocal.AllocationCount);
+            Assert.False(keepLocal.HasReturnEscape);
+            Assert.False(keepLocal.HasFieldOrPropertyEscape);
+            Assert.False(keepLocal.HasArgumentEscape);
+            Assert.False(keepLocal.HasUnknownEscape);
+            Assert.True(keepLocal.IsPureLike);
+
+            var capture = summaries.Single(summary => summary.QualifiedName == "Sample.Capture()");
+            Assert.Equal(1, capture.AllocationCount);
+            Assert.True(capture.HasCapturedVariableEscape);
+            Assert.True(capture.HasUnknownEscape);
+            Assert.True(capture.Allocations.Single().CapturedByClosure);
+            Assert.True(capture.Allocations.Single().HasUnknownEscape);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task AnalyzeAsync_MethodBodySummaries_IgnoreLocalFunctionBodies()
+    {
+        var root = CreateTempDirectory();
+
+        try
+        {
+            await WriteFileAsync(Path.Combine(root, "Sample.cs"), """
+                public sealed class Sample
+                {
+                    public object Compute()
+                    {
+                        var outer = new object();
+
+                        object Local()
+                        {
+                            return outer;
+                        }
+
+                        return new object();
+                    }
+                }
+                """);
+
+            var snapshot = await _analyzer.AnalyzeAsync(root);
+            var summary = snapshot.Snapshot.MethodBodySummaries.Single(candidate => candidate.QualifiedName == "Sample.Compute()");
+
+            Assert.Equal(2, summary.AllocationCount);
+            Assert.False(summary.HasCapturedVariableEscape);
+            Assert.DoesNotContain(summary.Allocations, allocation => allocation.CapturedByClosure);
+            Assert.Contains(summary.Allocations, allocation => allocation.EscapesViaReturn);
+        }
+        finally
+        {
+            DeleteDirectory(root);
+        }
+    }
+
+    [Fact]
     public async Task ResolveSymbol_WarnsWhenSimpleNameMatchesMultipleSymbols()
     {
         var root = CreateTempDirectory();
@@ -202,11 +329,14 @@ public sealed class CodebaseAnalyzerTests
         var analysis = await tools.AnalyzeCodebase(targetPath, cancellationToken: CancellationToken.None);
         var search = await tools.SearchSymbols(targetPath, "OrderService", cancellationToken: CancellationToken.None);
         var usages = await tools.FindSymbolUsages(targetPath, "RecommendationService", cancellationToken: CancellationToken.None);
+        var summary = await tools.GetMethodSummary(targetPath, "PlaceOrder", cancellationToken: CancellationToken.None);
 
         Assert.False(Path.IsPathRooted(analysis.TargetPath));
         Assert.Equal("SampleCodebase.csproj", analysis.TargetPath);
         Assert.All(search.Matches, match => Assert.True(match.FilePath is null || !Path.IsPathRooted(match.FilePath)));
         Assert.All(usages.Usages, usage => Assert.False(Path.IsPathRooted(usage.FilePath)));
+        Assert.NotNull(summary.Summary);
+        Assert.True(summary.Summary!.FilePath is null || !Path.IsPathRooted(summary.Summary.FilePath));
     }
 
     [Fact]

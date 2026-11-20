@@ -156,6 +156,29 @@ public sealed class CodeGraphTools
         return new GetCodeMetricsResponse(resolution.Message, resolution.Selected, typeMetrics, memberMetrics, hotspots);
     }
 
+    [McpServerTool, Description("Return the analyzed body summary for a member, including allocations, escape flags, and side-effect hints.")]
+    public async Task<GetMethodSummaryResponse> GetMethodSummary(
+        [Description("Path to a directory, solution, or project file.")] string targetPath,
+        [Description("Member name or qualified name to inspect.")] string symbolQuery,
+        [Description("When true, rebuild the graph instead of using the cached snapshot.")] bool forceRefresh = false,
+        CancellationToken cancellationToken = default)
+    {
+        var workspaceSnapshot = await _workspaceService.GetApiSnapshotAsync(targetPath, forceRefresh, cancellationToken).ConfigureAwait(false);
+        var resolution = _workspaceService.ResolveSymbol(workspaceSnapshot, symbolQuery, CodeNodeKind.Member);
+        if (resolution.Selected is null)
+        {
+            return new GetMethodSummaryResponse(resolution.Message ?? "Symbol not found.", null, null, resolution.Candidates);
+        }
+
+        var summary = workspaceSnapshot.Snapshot.MethodBodySummaries
+            .SingleOrDefault(candidate => string.Equals(candidate.SymbolId, resolution.Selected.SymbolId, StringComparison.Ordinal));
+        var message = summary is null
+            ? AppendMessage(resolution.Message, $"Symbol '{resolution.Selected.QualifiedName}' does not have an analyzed body summary.")
+            : resolution.Message;
+
+        return new GetMethodSummaryResponse(message, resolution.Selected, summary, resolution.Candidates);
+    }
+
     [McpServerTool, Description("Traverse the code graph using breadth-first search from a starting symbol.")]
     public async Task<BfsResponse> BfsGraph(
         [Description("Path to a directory, solution, or project file.")] string targetPath,
@@ -233,6 +256,11 @@ public sealed class CodeGraphTools
             : null;
     }
 
+    private static string AppendMessage(string? existing, string next) =>
+        string.IsNullOrWhiteSpace(existing)
+            ? next
+            : $"{existing} {next}";
+
     private static CodeNodeKind[] ParseKinds(string? kinds)
     {
         if (string.IsNullOrWhiteSpace(kinds))
@@ -295,6 +323,12 @@ public sealed record GetCodeMetricsResponse(
     IReadOnlyList<TypeMetric> TypeMetrics,
     IReadOnlyList<MemberMetric> MemberMetrics,
     IReadOnlyList<GraphHotspot> Hotspots);
+
+public sealed record GetMethodSummaryResponse(
+    string? Message,
+    SymbolCandidate? Symbol,
+    MethodBodySummary? Summary,
+    IReadOnlyList<SymbolCandidate> Candidates);
 
 public sealed record BfsVisit(
     string SymbolId,

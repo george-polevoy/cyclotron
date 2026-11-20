@@ -17,6 +17,10 @@ Cyclotron is a Roslyn-based code intelligence server for coding agents. It build
   - cyclomatic complexity at member and type level
   - cohesion as shared-field connectivity across methods
   - afferent/efferent coupling and instability
+- Computes member body summaries:
+  - allocation tracking for object, array, and anonymous-object creation
+  - return, member-write, call, and closure-capture escape flags
+  - coarse side-effect and unknown-escape hints
 - Extracts graph-informed quality signals:
   - cyclic regions via strongly connected components
   - broker types via betweenness centrality
@@ -59,6 +63,7 @@ The server exposes tools named from the public methods in `CodeGraphTools`, incl
 - `GetClassHierarchy`
 - `FindSymbolUsages`
 - `GetCodeMetrics`
+- `GetMethodSummary`
 - `BfsGraph`
 - `GetGraphQualitySignals`
 

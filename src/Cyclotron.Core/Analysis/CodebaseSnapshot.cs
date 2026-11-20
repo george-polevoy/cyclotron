@@ -12,6 +12,33 @@ public sealed record MemberMetric(
     int CyclomaticComplexity,
     string? FilePath);
 
+public sealed record AllocationSiteSummary(
+    int Index,
+    string Kind,
+    string? TypeName,
+    bool EscapesViaReturn,
+    bool EscapesViaMember,
+    bool EscapesViaArgument,
+    bool CapturedByClosure,
+    bool HasUnknownEscape);
+
+public sealed record MethodBodySummary(
+    string SymbolId,
+    string Name,
+    string QualifiedName,
+    string MemberKind,
+    string ContainingTypeId,
+    int AllocationCount,
+    IReadOnlyList<AllocationSiteSummary> Allocations,
+    bool HasReturnEscape,
+    bool HasFieldOrPropertyEscape,
+    bool HasArgumentEscape,
+    bool HasCapturedVariableEscape,
+    bool HasUnknownEscape,
+    bool HasSideEffects,
+    bool IsPureLike,
+    string? FilePath);
+
 public sealed record TypeMetric(
     string SymbolId,
     string Name,
@@ -72,6 +99,7 @@ public sealed record CodebaseSnapshot(
     DateTimeOffset AnalyzedAtUtc,
     CodeGraph Graph,
     IReadOnlyList<MemberMetric> MemberMetrics,
+    IReadOnlyList<MethodBodySummary> MethodBodySummaries,
     IReadOnlyList<TypeMetric> TypeMetrics,
     GraphQualitySignals Signals,
     IReadOnlyList<string> Diagnostics);
